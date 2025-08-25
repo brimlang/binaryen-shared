@@ -1,0 +1,258 @@
+# ============================================================================
+# Build and Publish Native Shared Libraries for Binaryen
+#
+# This workflow builds and publishes native shared libraries and CLI tools for
+# Binaryen (https://github.com/WebAssembly/binaryen) for all major platforms:
+#   - Linux x64 (.tar.gz)
+#   - macOS ARM64 (.tar.gz)
+#   - macOS x64 (.tar.gz)
+#   - Windows x64 (.zip)
+#
+# Features:
+# - Triggered manually with workflow_dispatch, specifying the Binaryen tag/commit.
+# - Allows custom minor/patch versioning for the release tag.
+# - Checks if a release for the given tag already exists before building.
+# - Builds from the official upstream Binaryen repository.
+# - Publishes all artifacts as a draft GitHub Release, including a combined archive.
+# - Intended for use by downstream CI workflows and package managers.
+# ============================================================================
+
+name: Build Native Libraries
+
+on:
+  workflow_dispatch:
+    inputs:
+      binaryen_tag:
+        description: "Binaryen tag or commit (e.g. version_116 or main)"
+        required: true
+        type: string
+      release_minor:
+        description: "Release minor version (default: 0)"
+        required: false
+        default: "0"
+        type: string
+      release_patch:
+        description: "Release patch version (default: 0)"
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-release:
+    name: Check if release exists
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+    steps:
+      - name: Compute release tag
+        id: tag
+        run: |
+          MINOR="${{ github.event.inputs.release_minor }}"
+          PATCH="${{ github.event.inputs.release_patch }}"
+          TAG="binaryen-${{ github.event.inputs.binaryen_tag }}-${MINOR}.${PATCH}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+      - name: Check if release exists
+        id: check
+        run: |
+          RELEASE_TAG="${{ steps.tag.outputs.tag }}"
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build native (${{ matrix.rid }})
+    needs: check-release
+    if: needs.check-release.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            archive: linux-x64.tar.gz
+            shell: bash
+          - os: ubuntu-latest
+            rid: linux-arm64
+            archive: linux-arm64.tar.gz
+            shell: bash
+          - os: macos-14
+            rid: osx-arm64
+            archive: osx-arm64.tar.gz
+            shell: bash
+          - os: macos-13
+            rid: osx-x64
+            archive: osx-x64.tar.gz
+            shell: bash
+          - os: windows-2022
+            rid: win-x64
+            archive: win-x64.zip
+            shell: pwsh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install build dependencies (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update && sudo apt-get install -y cmake ninja-build clang python3
+          fi
+
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install cmake ninja git -y
+        shell: pwsh
+
+      - name: Clone Binaryen
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.binaryen_tag }}" https://github.com/WebAssembly/binaryen.git binaryen
+        shell: ${{ matrix.shell }}
+
+      - name: Build Binaryen (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p binaryen/build
+          cd binaryen/build
+          cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF
+          ninja
+        shell: bash
+
+      - name: Build Binaryen (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir binaryen\build
+          cd binaryen\build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF
+          ninja
+        shell: pwsh
+
+      - name: Archive binaries (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd binaryen/build
+          tar -czf ../../${{ matrix.archive }} *
+        shell: bash
+
+      - name: Archive binaries (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd binaryen\build
+          7z a ..\..\${{ matrix.archive }} *
+        shell: pwsh
+
+      # Only generate and upload upstream meta on one runner.
+      - name: Copy LICENSE and generate upstream info
+        if: matrix.rid == 'linux-x64'
+        run: |
+          cp binaryen/LICENSE LICENSE-BINARYEN
+          cd binaryen
+          TAG="$(git describe --tags --always --dirty || true)"
+          SHA="$(git rev-parse --short=12 HEAD || true)"
+          printf "binaryen-tag: %s\nbinaryen-commit: %s\n" "$TAG" "$SHA" > ../UPSTREAM.txt
+        shell: ${{ matrix.shell }}
+
+      - name: Upload meta artifact
+        if: matrix.rid == 'linux-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-upstream
+          path: |
+            LICENSE-BINARYEN
+            UPSTREAM.txt
+          if-no-files-found: error
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: |
+            ${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: [check-release, build]
+    if: needs.check-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract meta files
+        run: |
+          # Use the first meta artifact found
+          META_DIR=$(find artifacts -type d -name "meta-upstream" | head -n1)
+          cp "$META_DIR/LICENSE-BINARYEN" .
+          cp "$META_DIR/UPSTREAM.txt" .
+
+      - name: Move artifacts to root
+        run: |
+          find artifacts -name "*.tar.gz" -o -name "*.zip" | while read file; do
+            mv "$file" .
+          done
+
+      - name: Create combined tar.gz archive
+        run: |
+          tar -czf binaryen-all.tar.gz linux-x64.tar.gz linux-arm64.tar.gz osx-arm64.tar.gz osx-x64.tar.gz win-x64.zip LICENSE-BINARYEN UPSTREAM.txt
+
+      - name: Create combined zip archive
+        run: |
+          zip binaryen-all.zip linux-x64.tar.gz linux-arm64.tar.gz osx-arm64.tar.gz osx-x64.tar.gz win-x64.zip LICENSE-BINARYEN UPSTREAM.txt
+
+      - name: Create Release Notes
+        run: |
+          cat > release-notes.md <<EOF
+          Native shared libraries and tools built from Binaryen ${{ github.event.inputs.binaryen_tag }}.
+
+          ## Contents
+          - `libbinaryen.so` / `libbinaryen.dylib` / `binaryen.dll` - Shared library
+          - `wasm-*` - Tools
+
+          ## Platforms
+          - `linux-x64.tar.gz` - Linux x64
+          - `linux-arm64.tar.gz` - Linux arm64
+          - `osx-arm64.tar.gz` - macOS Apple Silicon
+          - `osx-x64.tar.gz` - macOS Intel
+          - `win-x64.zip` - Windows x64
+          - `binaryen-all.tar.gz` - Combined Platforms
+          - `binaryen-all.zip` - Combined Platforms
+
+          ## License
+          These binaries are built from the Binaryen project and are subject to the Apache 2.0 license.
+          See LICENSE-BINARYEN for details.
+
+          ## Source
+          Built from: https://github.com/WebAssembly/binaryen/tree/${{ github.event.inputs.binaryen_tag }}
+          EOF
+
+      - name: Create Release with gh CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="${{ needs.check-release.outputs.release_tag }}"
+          gh release create "$RELEASE_TAG" \
+            linux-x64.tar.gz \
+            osx-arm64.tar.gz \
+            osx-x64.tar.gz \
+            win-x64.zip \
+            binaryen-all.tar.gz \
+            binaryen-all.zip \
+            LICENSE-BINARYEN \
+            UPSTREAM.txt \
+            --title "Binaryen Native Shared Libraries $RELEASE_TAG" \
+            --notes-file release-notes.md \
+            --draft
