@@ -118,7 +118,6 @@ jobs:
       - name: Clone Binaryen
         run: |
           git clone --depth 1 --branch "${{ github.event.inputs.binaryen_tag }}" https://github.com/WebAssembly/binaryen.git binaryen
-        shell: ${{ matrix.shell }}
 
       - name: Build Binaryen (Linux/macOS)
         if: runner.os != 'Windows'
@@ -161,7 +160,7 @@ jobs:
           TAG="$(git describe --tags --always --dirty || true)"
           SHA="$(git rev-parse --short=12 HEAD || true)"
           printf "binaryen-tag: %s\nbinaryen-commit: %s\n" "$TAG" "$SHA" > ../UPSTREAM.txt
-        shell: ${{ matrix.shell }}
+        shell: bash
 
       - name: Upload meta artifact
         if: matrix.rid == 'linux-x64'
