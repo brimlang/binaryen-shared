@@ -83,23 +83,18 @@ jobs:
           - os: ubuntu-latest
             rid: linux-x64
             archive: linux-x64.tar.gz
-            shell: bash
           - os: ubuntu-latest
             rid: linux-arm64
             archive: linux-arm64.tar.gz
-            shell: bash
           - os: macos-14
             rid: osx-arm64
             archive: osx-arm64.tar.gz
-            shell: bash
           - os: macos-13
             rid: osx-x64
             archive: osx-x64.tar.gz
-            shell: bash
           - os: windows-2022
             rid: win-x64
             archive: win-x64.zip
-            shell: pwsh
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install build dependencies (Linux/macOS)
@@ -113,7 +108,6 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install cmake ninja git -y
-        shell: pwsh
 
       - name: Clone Binaryen
         run: |
@@ -126,7 +120,6 @@ jobs:
           cd binaryen/build
           cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF
           ninja
-        shell: bash
 
       - name: Build Binaryen (Windows)
         if: runner.os == 'Windows'
@@ -135,21 +128,18 @@ jobs:
           cd binaryen\build
           cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF
           ninja
-        shell: pwsh
 
       - name: Archive binaries (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           cd binaryen/build
           tar -czf ../../${{ matrix.archive }} *
-        shell: bash
 
       - name: Archive binaries (Windows)
         if: runner.os == 'Windows'
         run: |
           cd binaryen\build
           7z a ..\..\${{ matrix.archive }} *
-        shell: pwsh
 
       # Only generate and upload upstream meta on one runner.
       - name: Copy LICENSE and generate upstream info
@@ -160,7 +150,6 @@ jobs:
           TAG="$(git describe --tags --always --dirty || true)"
           SHA="$(git rev-parse --short=12 HEAD || true)"
           printf "binaryen-tag: %s\nbinaryen-commit: %s\n" "$TAG" "$SHA" > ../UPSTREAM.txt
-        shell: bash
 
       - name: Upload meta artifact
         if: matrix.rid == 'linux-x64'
@@ -186,6 +175,9 @@ jobs:
     if: needs.check-release.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
